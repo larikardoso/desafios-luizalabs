@@ -8,6 +8,7 @@ from app.contrib.repository.dependencies import DatabaseDependency
 from fastapi.params import Body as body
 
 from sqlalchemy.future import select
+from sqlalchemy.exc import IntegrityError
 
 router = APIRouter()
 
@@ -26,8 +27,15 @@ async def post(
     categoria_out = CategoriaOut(id=uuid4(), **categoria_in.model_dump())
     categoria_model = CategoriaModel(**categoria_in.model_dump())
     
-    db_session.add(categoria_model)
-    await db_session.commit()
+    try:
+        db_session.add(categoria_model)
+        await db_session.commit()
+    except IntegrityError:
+        await db_session.rollback()
+        raise HTTPException(
+            status_code=303,
+            detail=f"Categoria já cadastrada: {categoria_model.nome}"
+        )
     
     return categoria_out
 

@@ -1,10 +1,14 @@
 from datetime import datetime
 from uuid import uuid4
-from fastapi import APIRouter, HTTPException, status, Body
+from fastapi import APIRouter, HTTPException, Query, status, Body
+from fastapi_pagination import LimitOffsetPage
+from fastapi_pagination.ext.sqlalchemy import paginate
 from pydantic import UUID4
 from sqlalchemy.future import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
 from app.atleta.models import AtletaModel
-from app.atleta.schemas import AtletaIn, AtletaOut, AtletaUpdate
+from app.atleta.schemas import AtletaIn, AtletaListOut, AtletaOut, AtletaUpdate
 
 from app.categorias.models import CategoriaModel
 from app.centro_treinamento.models import CentroTreinamentoModel
@@ -46,23 +50,26 @@ async def post(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Centro de treinamento '{centro_treinamento_nome}' não encontrado."
         )
+    
+    atleta = AtletaModel(**atleta_in.model_dump(
+        exclude={'categoria', 'centro_treinamento'}), 
+        categoria_id=categoria.pk_id, 
+        centro_treinamento_id=centro_treinamento.pk_id)
 
     try:
-        atleta_out = AtletaOut(id=uuid4(), created_at=datetime.utcnow(), **atleta_in.model_dump())
-        
-        atleta_model = AtletaModel(**atleta_in.model_dump(exclude={'categoria', 'centro_treinamento'}), categoria_id=categoria.pk_id, centro_treinamento_id=centro_treinamento.pk_id)
-        atleta_model.categoria_id = categoria.pk_id
-        atleta_model.centro_treinamento_id = centro_treinamento.pk_id
-
-        db_session.add(atleta_model)
+        db_session.add(atleta)
         await db_session.commit()
-    except Exception:
+        await db_session.refresh(atleta)
+    
+    except IntegrityError:
+        await db_session.rollback()
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro ao criar atleta"
+            status_code=status.HTTP_303_SEE_OTHER,
+            detail=f"Atleta com CPF '{atleta_in.cpf}' já existe."
         )
 
-    return atleta_out
+    return AtletaOut.model_validate(atleta)
+
 
 @router.get(
     '/', 
@@ -75,6 +82,45 @@ async def query(db_session: DatabaseDependency,) -> list[AtletaOut]:
     atletas: list[AtletaOut] = (await db_session.execute(select(AtletaModel))).scalars().all()
     
     return [AtletaOut.model_validate(atleta) for atleta in atletas]
+
+@router.get(
+    '/',
+    summary="Lista atletas",
+    response_model=LimitOffsetPage[AtletaListOut],
+    status_code=200
+)
+async def query(
+    db_session: DatabaseDependency,
+    nome: str | None = Query(None),
+    cpf: str | None = Query(None),
+):
+    query = (
+        select(AtletaModel)
+        .options(
+            selectinload(AtletaModel.categoria),
+            selectinload(AtletaModel.centro_treinamento)
+        )
+    )
+
+    if nome:
+        query = query.filter(AtletaModel.nome.ilike(f"%{nome}%"))
+
+    if cpf:
+        query = query.filter(AtletaModel.cpf == cpf)
+
+    return await paginate(
+        db_session,
+        query,
+        transformer=lambda atletas: [
+            AtletaListOut(
+                nome=a.nome,
+                categoria=a.categoria.nome,
+                centro_treinamento=a.centro_treinamento.nome
+            )
+            for a in atletas
+        ]
+    )
+
 
 @router.get(
     '/{id}', 

@@ -8,6 +8,7 @@ from app.contrib.repository.dependencies import DatabaseDependency
 from fastapi.params import Body as body
 
 from sqlalchemy.future import select
+from sqlalchemy.exc import IntegrityError
 
 router = APIRouter()
 
@@ -25,8 +26,16 @@ async def post(
     
     centro_treinamento_out = CentroTreinamentoOut(id=uuid4(), **centro_treinamento_in.model_dump())
     centro_treinamento_model = CentroTreinamentoModel(**centro_treinamento_in.model_dump())
-    db_session.add(centro_treinamento_model)
-    await db_session.commit()
+
+    try:
+        db_session.add(centro_treinamento_model)
+        await db_session.commit()
+    except IntegrityError:
+        await db_session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_303_SEE_OTHER,
+            detail=f"Centro de treinamento já cadastrado: {centro_treinamento_model.nome}"
+        )
     
     return centro_treinamento_out
 
